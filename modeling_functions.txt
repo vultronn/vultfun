@@ -1,0 +1,199 @@
+### Collinearity/Correlation
+col_cor <- function(df, p = 0.75){
+  ### Calculates correlation of all columns.
+  ### Filters to only column relationships with a correlation >= 0.75
+  #
+  ### Args
+  #   df = Dataframe of columns to test correlation
+  #   p = % of correlation (R2) to filter to
+  #
+  ### Output
+  #   Dataframe of pairs of columns & their correlation
+  
+  cor_col <- df %>%
+  cor() %>%
+  melt %>%
+  filter(abs(value) > p & Var1 != Var2) %>%
+  arrange(value)
+
+  ### Concatenate and sort Var1 & Var2 to later remove any duplicates
+  cor_col$concat <- paste(cor_col$Var1, cor_col$Var2)
+  cor_col$concat <- sapply(lapply(strsplit(cor_col[,4], " "), sort),paste,collapse = " ")
+  
+  cor_col <- cor_col[duplicated(cor_col$concat) == F, ]
+  
+  cor_col <- cor_col[,-4]
+  return(cor_col)
+}
+
+
+### Partition Data into Train, Validation, & Test
+part_data <- function(df, col, dc = c(""), tr = 0.6, va = 0.2, te = 0.2, dummy = F){
+    ### This function partitions your df into train, test & validation.
+    ### It also will apply a row index column for future reference.
+    #
+    ### Args
+    #   df = Dataframe of response & predictors
+    #   col = Columns to include in model
+    #   dc = Column to Drop
+    #   tr = % training data partition
+    #   va = % validation data partition
+    #   te = % test data partition
+    #######################################################################
+    ### Function to Parittion train, validatin, test
+    g = function(df, spec, seed){
+      set.seed(seed)
+      sample(cut(
+      seq(nrow(df)),
+      nrow(df)*cumsum(c(0,spec)),
+      labels = names(spec)
+      ))}
+  
+    ctrl <- trainControl(method = "repeatedcv", number = 10, repeats = 10)
+    spec = c(train = tr, test = va, validate = te)
+    stoch_spec <- c(train = tr, validate = te + va)
+
+    # drop_col <- c('a1_spey_d_perc')
+    drop_col <- dc
+    # df_19_a1_km3 <- cbind(dfy19ea1$TOTAL_PASS_PERC, df_19_a1_km3)
+    # colnames(df_19_a1_km3)[1] <- 'TOTAL_PASS_PERC'
+
+    if (dummy){
+      rf_col = c(col, 
+                 dummy_var,
+                 'index')
+    } else{
+      rf_col = c(col, 
+                 'index')
+    }
+    # rf_col = c(tested_cols_perc, 'index')
+    df$index = as.integer(row.names(df))
+    res = split(df[,rf_col], g(df, spec, 1))
+
+    ### Define data
+    train_df <- res$train
+    train_i <- train_df$index
+    # train_df <- select(train_df, -index)
+    val_df <- res$validate
+    val_i <- val_df$index
+    # val_df <- select(val_df, -index)
+    test_df <- res$test
+    test_i <- test_df$index
+    # test_df <- select(test_df, -index)
+
+    return(list(train_df, val_df, test_df))
+}
+
+### Execute powerTransform through all columns
+transf <- function(df){
+  # Calculates BoxCox lambda value
+  #
+  ### Args
+  #   df = data frame of columns (No Negatives)
+  # 
+  ### Output
+  #   df = dataframe with lambda value for each column
+  
+  trans <- lapply(df, function(x) powerTransform(x + .001)$lambda) %>% unlist
+  names(trans) <- gsub('\\..*', '', names(trans))
+  return(trans)
+}
+
+df_transf <- function(df, boxcox_df){
+  # Transform df columns from numeric class of boxcox_df by column names.
+  # Power Transformation 
+  
+  for (i in seq_len(length(boxcox_df))) {
+  col <- names(boxcox_df[i])
+  print(col)
+  if (boxcox_df[[i]] == 0) {
+    df[[col]] <- sapply(log(df[[col]] + .0001), function(x) replace(x, is.infinite(x), 0))
+  } else {
+      df[[col]] <- sapply(df[[col]] ** boxcox_df[[i]], function(x) replace(x, is.infinite(x), 0))
+  }
+  }
+  return(df)
+}
+
+cent_scl <- function(df, c = 0, s = 0){
+  # Normalized entire df
+  header <- colnames(df)
+  
+  if (length(c) > 1) {
+    cent = c
+    scl = s
+  } else {
+    cent <- colMeans(df)
+    scl <- apply(df, 2, function(x) sd(x))
+    scl <- ifelse(scl == 0, .0001, scl)
+  }
+  
+  df <- sapply(seq_len(nrow(df)), function(i) {
+  sapply(seq_len(length(cent)), function(a){
+  (df[[i,a]] - cent[[a]])/scl[[a]]
+})}) %>% t %>%  as.data.frame
+  
+  colnames(df) <- header
+  
+  if(length(c) > 1){
+    return(df)
+  } else
+    return(list(df, cent, scl))
+  
+}
+
+mast_f <- function(df, ml, all_df, typ){
+  actual_df <- data.frame(actual = df$TOTAL_PASS_PERC, index = df$index, tbl = typ)
+  pred_df <- data.frame(predicted = predict(ml, df))
+  mast_df <- cbind(pred_df, actual_df)
+  mast_df$OBS <- rep(seq(1,nrow(actual_df)), 1)
+  all_df <- rownames_to_column(all_df)
+  mast_df <- merge(mast_df, all_df, by.x = c('index'), by.y = c('rowname'), all.x = TRUE)
+  mast_df <- mast_df %>% 
+  group_by(OBS) %>% 
+  mutate(MAPE = 100*(abs(actual - predicted))/(actual),
+         ACTUAL = actual,
+         PREDICT = predicted) %>% 
+  dplyr::ungroup() %>% 
+  as.data.frame
+
+  # mast_df <- merge(select(dfy19ea1, dname, district, rownames), mast_df, by.x = c('rownames'), by.y = c('index'), all.y = T)
+  mast_df <- right_join(select(dfy19ea1, dname, district, region, rownames), mast_df, by = c('rownames' = 'index'))
+  
+  
+  mast_df <- mast_df %>% 
+    arrange(OBS, district) %>% 
+    select(-rownames)
+  
+  return(mast_df)
+}
+
+### Dummy Variable gen
+dumvar <- function(col, col_nm){
+  ### Generates dummy variables and drops the one level/column that 
+  ### has the fewest number of occurances.
+  #
+  ### Args
+  #   col = dataframe of column(s) to convert do dummy variables 
+  #   col_nm = Original name of columns
+  #
+  ### Output 
+  #   Dataframe of dummy variables with new names.
+  
+  dummy1 <- dummy.code(col) %>% as.data.frame
+  colnames(dummy1) <- paste0("I.", col_nm, '.', colnames(dummy1))
+  com_set <- unique(col)
+  com_set <- paste0("I.", col_nm, '.', com_set)
+  min_com_set <- apply(select(dummy1, com_set), 2, sum) %>% which.min %>% names
+  
+  if (length(com_set) == 2) {
+    colnm <- names(dummy1)[-which(names(dummy1)==min_com_set)]
+    dummy1 <- dummy1[, -which(names(dummy1) == min_com_set)]
+    dummy1 <- data.frame(dummy1)
+    colnames(dummy1) <- colnm
+  } else {
+    dummy1 <- dummy1[,-grep(min_com_set, colnames(dummy1), fixed = T)]
+  }
+
+  return(dummy1)
+}
